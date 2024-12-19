@@ -1,7 +1,7 @@
 import threading
 import time
 import sqlite3
-import gps
+import gpsd
 import logging
 from google.cloud import firestore
 from google.api_core.exceptions import GoogleAPICallError
@@ -35,22 +35,22 @@ class LocalDatabaseWriter(threading.Thread):
         self.write_interval_slow = write_interval_slow
         self.write_interval_fast = write_interval_fast
         self.speed_threshold = speed_threshold
-        self.gpsd = gps.gps(mode=gps.WATCH_ENABLE | gps.WATCH_NEWSTYLE)
         self.running = True
         self.last_write_time = 0
 
     def run(self):
+        gpsd.connect()  # Connect to the GPSD service
         conn = sqlite3.connect(self.db_name)
         c = conn.cursor()
 
         while self.running:
-            gps_data = self.gpsd.next()
-            if gps_data['class'] == 'TPV':
+            try:
+                gps_data = gpsd.get_current()
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                latitude = getattr(gps_data, 'lat', None)
-                longitude = getattr(gps_data, 'lon', None)
-                altitude = getattr(gps_data, 'alt', None)
-                speed = getattr(gps_data, 'speed', 0) or 0
+                latitude = gps_data.lat
+                longitude = gps_data.lon
+                altitude = gps_data.alt
+                speed = gps_data.hspeed or 0  # Horizontal speed
                 rpm = 0  # Placeholder for now
 
                 current_time = time.time()
@@ -64,6 +64,8 @@ class LocalDatabaseWriter(threading.Thread):
                     conn.commit()
                     self.last_write_time = current_time
                     logging.info(f"Local DB Write: {timestamp}, {latitude}, {longitude}, {altitude}, {speed}, {rpm}")
+            except Exception as e:
+                logging.error(f"Failed to retrieve GPS data: {e}")
 
             time.sleep(1)
 
@@ -107,7 +109,7 @@ class FirestoreDatabaseWriter(threading.Thread):
         conn.close()
 
 if __name__ == "__main__":
-    db_name = "boat_gps_data.db"
+    db_name = "boat_tracker.db"
 
     # Ensure the SQLite table exists before starting threads
     initialize_sqlite(db_name)
