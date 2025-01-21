@@ -5,7 +5,6 @@ After=network.target
 [Service]
 User=mike
 WorkingDirectory=/home/mike/boat-tracker
-ExecStartPre=/bin/bash /home/mike/boat-tracker/setup.sh
 ExecStart=/home/mike/boat-tracker/boat-venv/bin/python /home/mike/boat-tracker/boat_tracker.py
 Restart=always
 RestartSec=5
