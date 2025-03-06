@@ -7,8 +7,13 @@
 - sudo systemctl start boat-tracker.service
 - sudo systemctl status boat-tracker.service
 
+Make Sure the Serial Port Is Not Blocked
+By default, Raspberry Pi reserves UART for console login, which blocks GPS communication.
 
+sudo raspi-config
+Go to: Interfacing Options → Serial
+Disable the login shell over serial (No)
+Enable serial port hardware (Yes)
+Exit and reboot:
 
-3) uses duckdns to have a fixed domain on the internet, currently x46.duckdns.org
-
-4) TODO: set up Mumble server so that even without internet, two iphones can connect and chat for anchoring.
+cgps -s
