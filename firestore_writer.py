@@ -30,6 +30,9 @@ class FirestoreDatabaseWriter(threading.Thread):
                     "longitude": row[4],
                     "altitude": row[5],
                     "rpm": row[6],
+                    "engine_hours": row[7],
+                    "coolant_temp": row[8],
+                    "alternator_voltage": row[9]
                 }
                 try:
                     self.db.collection("gps_data1").add(doc)

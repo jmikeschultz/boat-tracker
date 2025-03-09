@@ -19,6 +19,9 @@ def initialize_sqlite(db_name):
             longitude REAL,
             altitude REAL,
             rpm REAL,
+            engine_hours REAL,
+            coolant_temp REAL,
+            alternator_voltage REAL,    
             uploaded INTEGER DEFAULT 0
         )
     """)
