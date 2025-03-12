@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import socket
 import json
 import time
@@ -52,12 +53,12 @@ def main():
     best_fix = get_best_gps_fix()
 
     if not best_fix:
-        print("⚠️ No GPS data received!")
+        print("No GPS data received!")
         return
 
     # Map fix mode to human-readable status
     fix_mode = best_fix.get("mode", 0)
-    fix_status = {1: "No Fix 🚫", 2: "2D Fix 📡", 3: "3D Fix ✅"}.get(fix_mode, "Unknown Fix ❓")
+    fix_status = {1: "No Fix", 2: "2D Fix", 3: "3D Fix"}.get(fix_mode, "Unknown Fix")
 
     print(f"Fix Status: {fix_status}")
 
@@ -72,8 +73,6 @@ def main():
         print(f"Heading: {best_fix['track']}°")
     if "time" in best_fix:
         print(f"Timestamp: {best_fix['time']}")
-
-    print("-" * 40)
 
 if __name__ == "__main__":
     main()
