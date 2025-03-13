@@ -5,6 +5,7 @@ from local_db_writer import LocalDatabaseWriter
 from firestore_writer import FirestoreDatabaseWriter
 from canbus_pipe_reader import CanbusPipeReader
 from shared_data import initialize_sqlite
+from threading import Event
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -23,9 +24,12 @@ if __name__ == "__main__":
     firestore_writer.start()
     canbus_reader.start()
 
+    stop_event = Event()
+
     try:
-        while True:
-            time.sleep(1)
+        while not stop_event.wait(5):  # Only wake up every 5 seconds
+            pass
+
     except KeyboardInterrupt:
         logging.info("Stopping threads...")
         local_writer.running = False

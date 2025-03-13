@@ -25,6 +25,7 @@ class CanbusPipeReader(threading.Thread):
                     while self.running:
                         line = fifo.readline().strip()
                         if not line:
+                            time.sleep(0.1)
                             continue
 
                         message = json.loads(line)

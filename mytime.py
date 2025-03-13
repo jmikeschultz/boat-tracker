@@ -9,6 +9,8 @@ from timezonefinder import TimezoneFinder
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+tf = TimezoneFinder()
+
 def get_timezone(tz_offset: str) -> timezone:
     # Regex to parse timezone offset
     match = re.match(r"^UTC(?P<sign>[+-])(?P<hours>\d{2}):(?P<minutes>\d{2})$", tz_offset)
@@ -57,7 +59,6 @@ def get_tz_offset(latitude: float, longitude: float) -> str:
     """
     try:
         # Determine the timezone
-        tf = TimezoneFinder()
         time_zone_name = tf.timezone_at(lat=latitude, lng=longitude)
         
         if not time_zone_name:
