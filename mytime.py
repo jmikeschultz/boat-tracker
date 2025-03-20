@@ -43,8 +43,13 @@ def get_shifted_timestamp(origin_tz: timezone) -> float:
     timestamp = datetime.now(tz=timezone.utc).timestamp()
     return shift_timestamp(timestamp, origin_tz)
 
-def get_tz_offset2(tz: timezone) -> str:
+def get_tz_offset_1(tz: timezone) -> str:
     return tz.tzname(None)
+
+def get_tz_offset_2(gps_data) -> str:
+    latitude = gps_data.lat
+    longitude = gps_data.lon
+    return get_tz_offset(latitude, longitude)
 
 def get_tz_offset(latitude: float, longitude: float) -> str:
     """

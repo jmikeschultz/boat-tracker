@@ -6,13 +6,20 @@ from firestore_writer import FirestoreDatabaseWriter
 from canbus_pipe_reader import CanbusPipeReader
 from shared_data import initialize_sqlite
 from threading import Event
+import os
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+logging.basicConfig(
+    level=logging.INFO,
+    format=LOG_FORMAT,
+    handlers=[logging.StreamHandler()]  # to stdout
+)
+logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     db_name = "boat_tracker.db"
-
+    
     # Ensure the SQLite table exists before starting threads
     initialize_sqlite(db_name)
 

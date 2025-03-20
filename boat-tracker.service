@@ -10,5 +10,8 @@ Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 
+StandardOutput=append:/var/log/boat_tracker.log
+StandardError=append:/var/log/boat_tracker.log
+
 [Install]
 WantedBy=multi-user.target

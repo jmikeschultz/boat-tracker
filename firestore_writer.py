@@ -5,8 +5,9 @@ import logging
 from google.cloud import firestore
 from google.api_core.exceptions import GoogleAPICallError
 
-BATCH_SIZE = 10  # Process 10 records per cycle
-UPLOAD_INTERVAL = 30  # Check for new data every 30 seconds
+BATCH_SIZE = 50  # Ensure this does not exceed Firestore's 500-limit
+UPLOAD_INTERVAL = 30  # Interval to check for new data
+MAX_RETRIES = 3  # Retry failed uploads
 
 class FirestoreDatabaseWriter(threading.Thread):
     """Uploads GPS data from SQLite to Firestore."""
@@ -14,25 +15,53 @@ class FirestoreDatabaseWriter(threading.Thread):
     def __init__(self, db_name):
         super().__init__()
         self.db_name = db_name
-        self.db = firestore.Client()
         self.running = True
+        self.stop_event = threading.Event()
 
     def run(self):
-        conn = sqlite3.connect(self.db_name, check_same_thread=False)
-        c = conn.cursor()
-
-        while self.running:
+        """Main loop to upload data to Firestore."""
+        while self.running and not self.stop_event.is_set():
             try:
-                # Select only a limited batch of unuploaded records
+                # Open SQLite connection for each cycle
+                conn = sqlite3.connect(self.db_name, check_same_thread=False)
+                c = conn.cursor()
+
+                # Fetch batch of unuploaded records
                 c.execute("SELECT * FROM gps_data WHERE uploaded = 0 LIMIT ?", (BATCH_SIZE,))
                 rows = c.fetchall()
 
                 if not rows:
                     logging.info("No new data to upload. Sleeping...")
+                    conn.close()
                     time.sleep(UPLOAD_INTERVAL)
                     continue
 
-                batch = self.db.batch()  # Start a Firestore batch transaction
+                logging.info(f"Found {len(rows)} records to upload.")
+                
+                # Initialize Firestore client inside loop to handle dropped connections
+                db = firestore.Client()
+
+                success = self.upload_to_firestore(db, rows)
+
+                if success:
+                    # Only update SQLite if Firestore commit was successful
+                    row_ids = [(row[0],) for row in rows]
+                    c.executemany("UPDATE gps_data SET uploaded = 1 WHERE id = ?", row_ids)
+                    conn.commit()
+                    logging.info(f"Marked {len(rows)} records as uploaded in SQLite.")
+
+                conn.close()
+
+            except Exception as e:
+                logging.error(f"Firestore upload loop error: {e}")
+
+            time.sleep(UPLOAD_INTERVAL)
+
+    def upload_to_firestore(self, db, rows):
+        """Uploads data to Firestore with error handling."""
+        for attempt in range(MAX_RETRIES):
+            try:
+                batch = db.batch()  # Start Firestore batch operation
 
                 for row in rows:
                     doc = {
@@ -46,24 +75,21 @@ class FirestoreDatabaseWriter(threading.Thread):
                         "coolant_temp": row[8],
                         "alternator_voltage": row[9]
                     }
-                    try:
-                        doc_ref = self.db.collection("gps_data1").document()
-                        batch.set(doc_ref, doc)  # Add to batch
-                        logging.info(f"Queued for upload: {row}")
-                    except GoogleAPICallError as e:
-                        logging.error(f"Failed to queue record {row[0]}: {e}")
+                    doc_ref = db.collection("gps_data").document()
+                    batch.set(doc_ref, doc)  # Add to batch
 
                 batch.commit()  # Execute batch upload
                 logging.info(f"Uploaded {len(rows)} records to Firestore.")
+                return True
 
-                # Mark uploaded records in SQLite
-                row_ids = [row[0] for row in rows]
-                c.executemany("UPDATE gps_data SET uploaded = 1 WHERE id = ?", [(row_id,) for row_id in row_ids])
-                conn.commit()
+            except GoogleAPICallError as e:
+                logging.error(f"Firestore upload failed (Attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                time.sleep(2**attempt)  # Exponential backoff
 
-            except Exception as e:
-                logging.error(f"Firestore upload failed: {e}")
+        logging.error("Max retries reached. Skipping batch.")
+        return False
 
-            time.sleep(UPLOAD_INTERVAL)  # Sleep before next batch
-
-        conn.close()
+    def stop(self):
+        """Signal thread to stop gracefully."""
+        self.running = False
+        self.stop_event.set()
