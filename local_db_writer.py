@@ -117,7 +117,7 @@ class LocalDatabaseWriter(threading.Thread):
             last_record = c.fetchone()
 
             if last_record is None:
-                logging.info('UPDATE: No last record.')
+                logging.info('UPDATE: Because no last record.')
                 return gps_data
 
             last_lat, last_lon, last_alt, last_utc_shifted_tstamp = last_record
@@ -129,7 +129,7 @@ class LocalDatabaseWriter(threading.Thread):
                 return gps_data
 
             if time_diff_secs > heartbeat_secs:
-                logging.info(f'UPDATE: Time threshold exceeded ({time_diff_secs} sec).')
+                logging.info(f'UPDATE: Heartbeat threshold exceeded ({time_diff_secs} sec).')
                 return MyGPSData(last_lat, last_lon, last_alt)
 
             logging.info(f'no_update: time_diff:{time_diff_secs} distance_delta_miles:{distance}')
