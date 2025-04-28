@@ -6,15 +6,31 @@ import logging
 import traceback
 from shared_data import latest_canbus_data, canbus_lock, initialize_sqlite, calculate_distance
 import mytime
+import json
+import os
 
 logger = logging.getLogger(__name__)
 
 MIN_MILES_DELTA = 0.10  # miles
-ENGINE_OFF_HEARTBEAT_SECS = 60 #3600
-ENGINE_ON_HEARTBEAT_SECS = 30 #60
+ENGINE_OFF_HEARTBEAT_SECS = 3600
+ENGINE_ON_HEARTBEAT_SECS = 60
 CANBUS_TIMEOUT = 10  # Stale data timeout
 READ_LOOP_SLEEP_SECS = 5
+GPS_OUTPUT_PATH = "/home/mike/.cache/boat/current_position.json"
 LAST_UPLOADED_QUERY = "SELECT latitude, longitude, altitude, utc_shifted_tstamp FROM gps_data ORDER BY utc_shifted_tstamp DESC LIMIT 1"
+
+def write_current_location(lat, lon):
+    try:
+        os.makedirs(os.path.dirname(GPS_OUTPUT_PATH), exist_ok=True)
+        with open(GPS_OUTPUT_PATH + ".tmp", "w") as f:
+            json.dump({
+                "lat": lat,
+                "lon": lon,
+                "ts": time.time()
+            }, f)
+        os.replace(GPS_OUTPUT_PATH + ".tmp", GPS_OUTPUT_PATH)
+    except Exception as e:
+        logger.warning(f"Failed to write GPS location for wlan1_manager: {e}")
 
 class MyGPSData:
     def __init__(self, lat, lon, alt):
@@ -83,6 +99,8 @@ class LocalDatabaseWriter(threading.Thread):
         alternator_voltage = self.get_latest_canbus("Alternator Voltage")
 
         latitude, longitude, altitude = gps_data.lat, gps_data.lon, gps_data.alt
+
+        write_current_location(latitude, longitude)
 
         # Open SQLite connection per transaction
         conn = sqlite3.connect(self.db_name, check_same_thread=False)
