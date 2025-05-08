@@ -18,13 +18,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-    db_name = "boat_tracker.db"
+    db_file = "boat_tracker.db"
     
     # Ensure the SQLite table exists before starting threads
-    initialize_sqlite(db_name)
+    initialize_sqlite(db_file)
 
-    local_writer = LocalDatabaseWriter(db_name)
-    firestore_writer = FirestoreDatabaseWriter(db_name)
+    local_writer = LocalDatabaseWriter(db_file)
+    firestore_writer = FirestoreDatabaseWriter(db_file)
     canbus_reader = CanbusPipeReader()
 
     local_writer.start()

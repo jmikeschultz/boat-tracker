@@ -12,9 +12,9 @@ MAX_RETRIES = 3  # Retry failed uploads
 class FirestoreDatabaseWriter(threading.Thread):
     """Uploads GPS data from SQLite to Firestore."""
 
-    def __init__(self, db_name):
+    def __init__(self, db_file):
         super().__init__()
-        self.db_name = db_name
+        self.db_file = db_file
         self.running = True
         self.stop_event = threading.Event()
 
@@ -23,7 +23,7 @@ class FirestoreDatabaseWriter(threading.Thread):
         while self.running and not self.stop_event.is_set():
             try:
                 # Open SQLite connection for each cycle
-                conn = sqlite3.connect(self.db_name, check_same_thread=False)
+                conn = sqlite3.connect(self.db_file, check_same_thread=False)
                 c = conn.cursor()
 
                 # Fetch batch of unuploaded records
