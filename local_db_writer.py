@@ -4,6 +4,7 @@ import sqlite3
 import gpsd
 import logging
 import traceback
+from datetime import datetime, timezone
 from shared_data import latest_canbus_data, canbus_lock, initialize_sqlite, calculate_distance
 import mytime
 import json
@@ -11,44 +12,123 @@ import os
 
 logger = logging.getLogger(__name__)
 
-MIN_MILES_DELTA = 0.10  # miles
-ENGINE_OFF_HEARTBEAT_SECS = 3600
-ENGINE_ON_HEARTBEAT_SECS = 60
+MAX_MPH = 90  # miles
+MIN_MILES_DELTA = 0.1
 CANBUS_TIMEOUT = 10  # Stale data timeout
-READ_LOOP_SLEEP_SECS = 5
+GPS_LOOP_SECS = 1
 GPS_OUTPUT_PATH = "/home/mike/.cache/boat/current_position.json"
-LAST_UPLOADED_QUERY = "SELECT latitude, longitude, altitude, utc_shifted_tstamp FROM gps_data ORDER BY utc_shifted_tstamp DESC LIMIT 1"
+LAST_RECORD = "SELECT latitude, longitude, rpm, utc_shifted_tstamp FROM gps_data WHERE uploaded != 2 ORDER BY utc_shifted_tstamp DESC LIMIT 1"
 
-def write_current_location(lat, lon):
+NOT_UPLOADED = 0
+NODELTA_UPLOADED = 2
+
+db_expected_fields = [
+    "tz_offset",
+    "utc_shifted_tstamp",
+    "latitude",
+    "longitude",
+    "altitude",
+    "gps_knots",
+    "rpm",
+    "engine_hours",
+    "coolant_temp",
+    "alternator_voltage",
+    "uploaded"
+]
+
+def write_current_location(lat, lon, secs_at_location):
     try:
         os.makedirs(os.path.dirname(GPS_OUTPUT_PATH), exist_ok=True)
         with open(GPS_OUTPUT_PATH + ".tmp", "w") as f:
             json.dump({
                 "lat": lat,
                 "lon": lon,
+                "secs_at_location": secs_at_location,
                 "ts": time.time()
             }, f)
         os.replace(GPS_OUTPUT_PATH + ".tmp", GPS_OUTPUT_PATH)
     except Exception as e:
         logger.warning(f"Failed to write GPS location for wlan1_manager: {e}")
 
-class MyGPSData:
-    def __init__(self, lat, lon, alt):
-        self.lat = lat
-        self.lon = lon
-        self.alt = alt
 
+def insert_row(conn, data):
+    """
+    Insert a new row into the given table using fixed expected fields.
+    Missing fields are set to NULL. Uses try/finally for safe resource cleanup.
+    """
+    table_name = 'gps_data'
+    columns = ", ".join(db_expected_fields)
+    placeholders = ", ".join(f":{field}" for field in db_expected_fields)
+
+    full_data = {field: data.get(field) for field in db_expected_fields}
+
+    sql = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
+
+    c = conn.cursor()
+    try:
+        c.execute(sql, full_data)
+        conn.commit()
+    finally:
+        c.close()
+
+
+def upsert_nodelta_row(conn, data):
+    """
+    Update the row where uploaded = 2, or insert a new one if none exists.
+    (No 'updated' field.)
+    """
+    table_name = 'gps_data'
+    set_clause = ", ".join(f"{field} = :{field}" for field in db_expected_fields)
+    columns = ", ".join(db_expected_fields)
+    placeholders = ", ".join(f":{field}" for field in db_expected_fields)
+
+    full_data = {field: data.get(field) for field in db_expected_fields}
+
+    c = conn.cursor()
+    try:
+        # First check if a row with uploaded=2 exists
+        c.execute(f"SELECT id FROM {table_name} WHERE uploaded = 2 LIMIT 1")
+        row = c.fetchone()
+
+        if row:
+            # UPDATE
+            sql = f"UPDATE {table_name} SET {set_clause} WHERE uploaded = 2"
+            c.execute(sql, full_data)
+        else:
+            # INSERT
+            sql = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
+            c.execute(sql, full_data)
+
+        conn.commit()
+    finally:
+        c.close()
+
+def publish_nodelta_row(conn):
+    """
+    Set uploaded = 0 for row where uploaded = 2.
+    """
+    table_name = 'gps_data'
+    sql = f"UPDATE {table_name} SET uploaded = {NOT_UPLOADED} WHERE uploaded = {NODELTA_UPLOADED}"
+
+    c = conn.cursor()
+    try:
+        c.execute(sql)
+        conn.commit()
+    finally:
+        c.close()
+        
 class LocalDatabaseWriter(threading.Thread):
     """Writes GPS and CAN data to the SQLite database."""
 
-    def __init__(self, db_name):
+    def __init__(self, db_file):
         super().__init__()
-        self.db_name = db_name
+        self.db_file = db_file
         self.running = True
         self.stop_event = threading.Event()
 
     def run(self):
         """Main loop that collects GPS and CAN data and writes it to SQLite."""
+
         if not self.establish_gps_connection():
             logging.critical("GPSD is unavailable. Exiting thread.")
             return
@@ -57,18 +137,18 @@ class LocalDatabaseWriter(threading.Thread):
             try:
                 gps_data = gpsd.get_current()
                 
-                if not gps_data or gps_data.mode < 2:
+                if not gps_data or gps_data.mode < 2: # mode = num satelites
                     logging.warning("No GPS fix. Skipping update.")
-                    self.stop_event.wait(READ_LOOP_SLEEP_SECS)
+                    self.stop_event.wait(GPS_LOOP_SECS)
                     continue
 
                 self.process(gps_data)
-                self.stop_event.wait(READ_LOOP_SLEEP_SECS)  # Allows immediate shutdown
+                self.stop_event.wait(GPS_LOOP_SECS)  # Allows immediate shutdown
 
             except Exception as e:
                 logging.error(f"Error in main loop: {e}")
                 traceback.print_exc()
-                self.stop_event.wait(READ_LOOP_SLEEP_SECS)
+                self.stop_event.wait(GPS_LOOP_SECS)
 
     def establish_gps_connection(self):
         """Attempts to establish a connection to GPSD once at startup."""
@@ -87,74 +167,85 @@ class LocalDatabaseWriter(threading.Thread):
             logging.warning("Skipping record due to unknown time zone.")
             return
 
+        gps_dt = datetime.strptime(gps_data.time, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        gps_tstamp = gps_dt.timestamp()
+
+        gps_knots = gps_data.speed() * 1.94384
+        
         rpm = self.get_latest_canbus("Engine RPM")
-        utc_shifted_tstamp = mytime.get_shifted_timestamp(mytime.get_timezone(tz_offset))
+        utc_shifted_tstamp = mytime.shift_timestamp(gps_tstamp, mytime.get_timezone(tz_offset))
+        utc_shifted_tstamp_old = mytime.get_shifted_timestamp(mytime.get_timezone(tz_offset))
 
-        gps_data = self.get_updateable(gps_data, utc_shifted_tstamp, rpm)
-        if gps_data is None:
-            return
+        #print('gps timestamp', utc_shifted_tstamp)
+        #print('legacy timestamp', utc_shifted_tstamp_old)
+        #print('gps - leg', utc_shifted_tstamp - utc_shifted_tstamp_old)        
 
-        engine_hours = self.get_latest_canbus("Engine Hours")
-        coolant_temp = self.get_latest_canbus("Coolant Temperature")
-        alternator_voltage = self.get_latest_canbus("Alternator Voltage")
+        is_delta, secs_diff = self.is_delta(gps_data, utc_shifted_tstamp, rpm)
+        uploaded = NOT_UPLOADED if is_delta else NODELTA_UPLOADED
+        
+        sql_data = dict(tz_offset=tz_offset,
+                        utc_shifted_tstamp=utc_shifted_tstamp,
+                        latitude=gps_data.lat,
+                        longitude=gps_data.lon,
+                        altitude=gps_data.alt,
+                        gps_knots=gps_knots,
+                        rpm=rpm,
+                        engine_hours=self.get_latest_canbus("Engine Hours"),
+                        coolant_temp=self.get_latest_canbus("Coolant Temperature"),
+                        alternator_voltage=self.get_latest_canbus("Alternator Voltage"),
+                        uploaded=uploaded)
 
-        latitude, longitude, altitude = gps_data.lat, gps_data.lon, gps_data.alt
-
-        write_current_location(latitude, longitude)
+        write_current_location(gps_data.lat, gps_data.lon, secs_diff)
 
         # Open SQLite connection per transaction
-        conn = sqlite3.connect(self.db_name, check_same_thread=False)
+        conn = sqlite3.connect(self.db_file)
         try:
-            c = conn.cursor()
-            c.execute(
-                """
-                INSERT INTO gps_data
-                (tz_offset, utc_shifted_tstamp, latitude, longitude, altitude, rpm,
-                engine_hours, coolant_temp, alternator_voltage)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (tz_offset, utc_shifted_tstamp, latitude, longitude, altitude, rpm,
-                 engine_hours, coolant_temp, alternator_voltage),
-            )
-            conn.commit()
-            logging.info(f"Local DB Write: lat:{latitude}, lon:{longitude}, alt:{altitude}, "
-                         f"rpm:{rpm}, engine_hours:{engine_hours}, coolant_temp:{coolant_temp}, "
-                         f"alternator_voltage:{alternator_voltage}")
+            if is_delta:
+                publish_nodelta_row(conn)
+                insert_row(conn, sql_data)
+            else:
+                upsert_nodelta_row(conn, sql_data)
+                logging.info(f"Local DB Write: lat:{gps_data.lat}, lon:{gps_data.lon}, alt:{gps_data.alt} rpm:{rpm} gps_knots:{gps_knots}")
         finally:
             conn.close()  # Ensure DB connection is closed properly
 
-    def get_updateable(self, gps_data, utc_shifted_tstamp, rpm):
-        """Determines if new GPS data should be stored based on distance and time threshold."""
-        engine_on = rpm is not None and rpm > 0
-        heartbeat_secs = ENGINE_ON_HEARTBEAT_SECS if engine_on else ENGINE_OFF_HEARTBEAT_SECS
-
-        conn = sqlite3.connect(self.db_name, check_same_thread=False)
+    def is_delta(self, gps_data, utc_shifted_tstamp, rpm) -> (bool, float):
+        conn = sqlite3.connect(self.db_file)
         try:
             c = conn.cursor()
-            c.execute(LAST_UPLOADED_QUERY)
+            c.execute(LAST_RECORD) # last record not the nodelta-record (when uploaded != 2)
             last_record = c.fetchone()
 
             if last_record is None:
                 logging.info('UPDATE: Because no last record.')
-                return gps_data
+                return True, 0.0
 
-            last_lat, last_lon, last_alt, last_utc_shifted_tstamp = last_record
-            distance = calculate_distance(gps_data.lat, gps_data.lon, last_lat, last_lon)
-            time_diff_secs = utc_shifted_tstamp - last_utc_shifted_tstamp
+            last_lat, last_lon, last_rpm, last_utc_shifted_tstamp = last_record
+            delta_miles = calculate_distance(gps_data.lat, gps_data.lon, last_lat, last_lon)
+            delta_secs = utc_shifted_tstamp - last_utc_shifted_tstamp
+            mph = delta_miles / (delta_secs / 3600.0)
 
-            if distance > MIN_MILES_DELTA:
-                logging.info(f'UPDATE: Distance threshold exceeded ({distance} miles).')
-                return gps_data
+            #if mph < MPH_MAX_DELTA:
+            if delta_miles > MIN_MILES_DELTA:
+                #logging.info(f'UPDATE: {mph} mph less than max ({MPH_MAX}).')
+                return True, delta_secs
 
-            if time_diff_secs > heartbeat_secs:
-                logging.info(f'UPDATE: Heartbeat threshold exceeded ({time_diff_secs} sec).')
-                return MyGPSData(last_lat, last_lon, last_alt)
+            rpm = 0 if rpm is None else rpm
+            last_rpm = 0 if last_rpm is None else last_rpm
+            
+            if rpm - last_rpm > 10:
+                return True, delta_secs
 
-            logging.info(f'no_update: time_diff:{time_diff_secs} distance_delta_miles:{distance}')
-            return None  # No update needed
         finally:
             conn.close()
 
+        # case of no delta
+        # make the position be exactly the last position so we can recognize it easy
+        gps_data.lat = last_lat
+        gps_data.lon = last_lon
+            
+        return False, delta_secs            
+        
     def get_latest_canbus(self, name):
         """Returns the most recent CAN bus value or None if stale."""
         with canbus_lock:

@@ -7,9 +7,11 @@ latest_canbus_data = {}
 canbus_lock = threading.Lock()
 
 def initialize_sqlite(db_name):
-    """Initializes the SQLite database with required tables."""
+    """Initializes the SQLite database with required tables and index."""
     conn = sqlite3.connect(db_name)
     c = conn.cursor()
+    
+    # Create table if it doesn't exist
     c.execute("""
         CREATE TABLE IF NOT EXISTS gps_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,13 +20,21 @@ def initialize_sqlite(db_name):
             latitude REAL,
             longitude REAL,
             altitude REAL,
+            gps_knots REAL,
             rpm REAL,
             engine_hours REAL,
             coolant_temp REAL,
-            alternator_voltage REAL,    
+            alternator_voltage REAL,
             uploaded INTEGER DEFAULT 0
         )
     """)
+    
+    # Create index on utc_shifted_tstamp to speed up queries
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_gps_data_utc_shifted_tstamp 
+        ON gps_data (utc_shifted_tstamp)
+    """)
+    
     conn.commit()
     conn.close()
 
