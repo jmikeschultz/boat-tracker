@@ -5,8 +5,8 @@ import logging
 from google.cloud import firestore
 from google.api_core.exceptions import GoogleAPICallError
 
-BATCH_SIZE = 50  # Ensure this does not exceed Firestore's 500-limit
-UPLOAD_INTERVAL = 30  # Interval to check for new data
+BATCH_SIZE = 250  # Ensure this does not exceed Firestore's 500-limit
+UPLOAD_INTERVAL = 60  # Interval to check for new data
 MAX_RETRIES = 3  # Retry failed uploads
 
 class FirestoreDatabaseWriter(threading.Thread):
@@ -62,6 +62,19 @@ class FirestoreDatabaseWriter(threading.Thread):
         for attempt in range(MAX_RETRIES):
             try:
                 batch = db.batch()  # Start Firestore batch operation
+                # 0 id
+                # 1 tz_offset
+                # 2 utc_shifted_tstamp
+                # 3 latitude
+                # 4 longitude
+                # 5 altitude
+                # 6 gps_knots
+                # 7 rpm
+                # 8 engine_hours
+                # 9 coolant_temp
+                # 10 alternator_voltage
+                # 11 is_delta
+                # 12 uploaded
 
                 for row in rows:
                     doc = {
@@ -70,10 +83,12 @@ class FirestoreDatabaseWriter(threading.Thread):
                         "latitude": row[3],
                         "longitude": row[4],
                         "altitude": row[5],
-                        "rpm": row[6],
-                        "engine_hours": row[7],
-                        "coolant_temp": row[8],
-                        "alternator_voltage": row[9]
+                        "gps_knots": row[6],
+                        "rpm": row[7],
+                        "engine_hours": row[8],
+                        "coolant_temp": row[9],
+                        "alternator_voltage": row[10],
+                        "is_delta": row[11]
                     }
                     doc_ref = db.collection("gps_data").document()
                     batch.set(doc_ref, doc)  # Add to batch

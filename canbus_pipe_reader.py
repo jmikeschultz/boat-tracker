@@ -15,7 +15,6 @@ class CanbusPipeReader(threading.Thread):
         self.running = True
 
     def run(self):
-        """Continuously reads CAN bus messages and updates shared memory."""
         if not os.path.exists(PIPE_PATH):
             os.mkfifo(PIPE_PATH)
 
@@ -28,16 +27,37 @@ class CanbusPipeReader(threading.Thread):
                             time.sleep(0.1)
                             continue
 
-                        message = json.loads(line)
-                        timestamp = message.get("timestamp", time.time())
+                        try:
+                            message = json.loads(line)
+                            timestamp = message.get("timestamp", time.time())
 
-                        with canbus_lock:
-                            if "PGNname" in message:
-                                latest_canbus_data[message["PGNname"]] = {
-                                    "value": message["value"],
-                                    "timestamp": timestamp,
-                                }
+                            # Legacy PGNname format
+                            if "PGNname" in message and "value" in message:
+                                name = message["PGNname"]
+                                val = message["value"]
+                                with canbus_lock:
+                                    latest_canbus_data[name] = {
+                                        "value": val,
+                                        "timestamp": timestamp
+                                    }
+
+                            # Tolerant full-packet support
+                            else:
+                                for key, val in message.items():
+                                    if key == "timestamp":
+                                        continue
+                                    if isinstance(val, (int, float, str)):
+                                        with canbus_lock:
+                                            latest_canbus_data[key] = {
+                                                "value": val,
+                                                "timestamp": timestamp
+                                            }
+
+                        except json.JSONDecodeError as e:
+                            logging.warning(f"Invalid JSON from pipe: {e}")
+                        except Exception as e:
+                            logging.error(f"Failed to process pipe message: {e}")
+
             except Exception as e:
                 logging.error(f"Error reading from CAN bus pipe: {e}")
-
-            time.sleep(1)
+                time.sleep(1)

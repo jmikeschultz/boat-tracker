@@ -6,6 +6,21 @@ from geopy.distance import geodesic
 latest_canbus_data = {}
 canbus_lock = threading.Lock()
 
+db_expected_fields = [
+    "tz_offset",
+    "utc_shifted_tstamp",
+    "latitude",
+    "longitude",
+    "altitude",
+    "gps_knots",
+    "rpm",
+    "engine_hours",
+    "coolant_temp",
+    "alternator_voltage",
+    "is_delta",
+    "uploaded"
+]
+
 def initialize_sqlite(db_name):
     """Initializes the SQLite database with required tables and index."""
     conn = sqlite3.connect(db_name)
@@ -25,6 +40,7 @@ def initialize_sqlite(db_name):
             engine_hours REAL,
             coolant_temp REAL,
             alternator_voltage REAL,
+            is_delta INTEGER,
             uploaded INTEGER DEFAULT 0
         )
     """)

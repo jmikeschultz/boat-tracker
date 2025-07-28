@@ -5,15 +5,14 @@ import gpsd
 import logging
 import traceback
 from datetime import datetime, timezone
-from shared_data import latest_canbus_data, canbus_lock, initialize_sqlite, calculate_distance
+from shared_data import latest_canbus_data, canbus_lock, initialize_sqlite, calculate_distance, db_expected_fields
 import mytime
 import json
 import os
 
 logger = logging.getLogger(__name__)
 
-MAX_MPH = 90  # miles
-MIN_MILES_DELTA = 0.1
+HEARTBEAT_SECS = 3600 * 1
 CANBUS_TIMEOUT = 10  # Stale data timeout
 GPS_LOOP_SECS = 1
 GPS_OUTPUT_PATH = "/home/mike/.cache/boat/current_position.json"
@@ -21,20 +20,6 @@ LAST_RECORD = "SELECT latitude, longitude, rpm, utc_shifted_tstamp FROM gps_data
 
 NOT_UPLOADED = 0
 NODELTA_UPLOADED = 2
-
-db_expected_fields = [
-    "tz_offset",
-    "utc_shifted_tstamp",
-    "latitude",
-    "longitude",
-    "altitude",
-    "gps_knots",
-    "rpm",
-    "engine_hours",
-    "coolant_temp",
-    "alternator_voltage",
-    "uploaded"
-]
 
 def write_current_location(lat, lon, secs_at_location):
     try:
@@ -81,9 +66,9 @@ def upsert_nodelta_row(conn, data):
     set_clause = ", ".join(f"{field} = :{field}" for field in db_expected_fields)
     columns = ", ".join(db_expected_fields)
     placeholders = ", ".join(f":{field}" for field in db_expected_fields)
-
+    
     full_data = {field: data.get(field) for field in db_expected_fields}
-
+    
     c = conn.cursor()
     try:
         # First check if a row with uploaded=2 exists
@@ -109,7 +94,6 @@ def publish_nodelta_row(conn):
     """
     table_name = 'gps_data'
     sql = f"UPDATE {table_name} SET uploaded = {NOT_UPLOADED} WHERE uploaded = {NODELTA_UPLOADED}"
-
     c = conn.cursor()
     try:
         c.execute(sql)
@@ -127,6 +111,7 @@ class LocalDatabaseWriter(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self):
+        num_loops = 0
         """Main loop that collects GPS and CAN data and writes it to SQLite."""
 
         if not self.establish_gps_connection():
@@ -136,9 +121,11 @@ class LocalDatabaseWriter(threading.Thread):
         while self.running and not self.stop_event.is_set():
             try:
                 gps_data = gpsd.get_current()
+                num_loops += 1
                 
                 if not gps_data or gps_data.mode < 2: # mode = num satelites
-                    logging.warning("No GPS fix. Skipping update.")
+                    if num_loops % 60 == 0:
+                        logging.warning("No GPS fix. Skipping update.")
                     self.stop_event.wait(GPS_LOOP_SECS)
                     continue
 
@@ -172,7 +159,7 @@ class LocalDatabaseWriter(threading.Thread):
 
         gps_knots = gps_data.speed() * 1.94384
         
-        rpm = self.get_latest_canbus("Engine RPM")
+        rpm = self.get_latest_canbus("RPM")
         utc_shifted_tstamp = mytime.shift_timestamp(gps_tstamp, mytime.get_timezone(tz_offset))
         utc_shifted_tstamp_old = mytime.get_shifted_timestamp(mytime.get_timezone(tz_offset))
 
@@ -190,9 +177,10 @@ class LocalDatabaseWriter(threading.Thread):
                         altitude=gps_data.alt,
                         gps_knots=gps_knots,
                         rpm=rpm,
-                        engine_hours=self.get_latest_canbus("Engine Hours"),
-                        coolant_temp=self.get_latest_canbus("Coolant Temperature"),
-                        alternator_voltage=self.get_latest_canbus("Alternator Voltage"),
+                        engine_hours=self.get_latest_canbus("Hours"),
+                        coolant_temp=self.get_latest_canbus("CoolantTemp"),
+                        alternator_voltage=self.get_latest_canbus("BatteryVoltage"),
+                        is_delta=1 if is_delta else 0,
                         uploaded=uploaded)
 
         write_current_location(gps_data.lat, gps_data.lon, secs_diff)
@@ -203,9 +191,12 @@ class LocalDatabaseWriter(threading.Thread):
             if is_delta:
                 publish_nodelta_row(conn)
                 insert_row(conn, sql_data)
+                logging.debug(f"Local DB Write: lat:{gps_data.lat}, lon:{gps_data.lon}, alt:{gps_data.alt} rpm:{rpm} gps_knots:{gps_knots}")
             else:
                 upsert_nodelta_row(conn, sql_data)
-                logging.info(f"Local DB Write: lat:{gps_data.lat}, lon:{gps_data.lon}, alt:{gps_data.alt} rpm:{rpm} gps_knots:{gps_knots}")
+                if secs_diff > HEARTBEAT_SECS:
+                    publish_nodelta_row(conn)
+                #logging.info('no delta')
         finally:
             conn.close()  # Ensure DB connection is closed properly
 
@@ -225,15 +216,20 @@ class LocalDatabaseWriter(threading.Thread):
             delta_secs = utc_shifted_tstamp - last_utc_shifted_tstamp
             mph = delta_miles / (delta_secs / 3600.0)
 
-            #if mph < MPH_MAX_DELTA:
+            if mph < 0.10:
+                MIN_MILES_DELTA = 0.10 # 540 ft
+            else:
+                MIN_MILES_DELTA = 0.006 # 32
+
+            #print(f'delta_miles:{delta_miles} delta_secs:{delta_secs} mph:{mph} MIN_MILES_DELTA:{MIN_MILES_DELTA}')
+
             if delta_miles > MIN_MILES_DELTA:
-                #logging.info(f'UPDATE: {mph} mph less than max ({MPH_MAX}).')
                 return True, delta_secs
 
             rpm = 0 if rpm is None else rpm
             last_rpm = 0 if last_rpm is None else last_rpm
             
-            if rpm - last_rpm > 10:
+            if abs(rpm - last_rpm) >= 50:
                 return True, delta_secs
 
         finally:
@@ -243,7 +239,6 @@ class LocalDatabaseWriter(threading.Thread):
         # make the position be exactly the last position so we can recognize it easy
         gps_data.lat = last_lat
         gps_data.lon = last_lon
-            
         return False, delta_secs            
         
     def get_latest_canbus(self, name):
@@ -251,7 +246,10 @@ class LocalDatabaseWriter(threading.Thread):
         with canbus_lock:
             data = latest_canbus_data.get(name)
             if data and (time.time() - data["timestamp"] <= CANBUS_TIMEOUT):
-                return float(data["value"])
+                val = float(data["value"])
+                if val < 0:
+                    return None
+                return val
             return None  # Mark as unknown
 
     def stop(self):
